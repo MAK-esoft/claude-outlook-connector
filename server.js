@@ -32,6 +32,8 @@ const ENTRA_TOKEN = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
 const GRAPH_SCOPES = [
   "https://graph.microsoft.com/Mail.Send",
+  "https://graph.microsoft.com/Mail.Read",
+  "https://graph.microsoft.com/Mail.ReadWrite",
   "offline_access",
   "openid",
   "profile",
