@@ -1,6 +1,14 @@
 // server.js
 // Claude Email Connector — remote MCP server relaying to Microsoft Graph sendMail.
 // No token storage, no refresh logic — Claude owns the OAuth token lifecycle via offline_access.
+//
+// This server also acts as a thin, stateless OAuth *proxy* in front of Microsoft Entra.
+// Reason: Claude (like all MCP clients) includes the RFC 8707 `resource` parameter in the
+// OAuth authorize/token requests. Entra's v2.0 endpoint rejects `resource` outright
+// (AADSTS901002 / AADSTS9010010). So instead of pointing Claude directly at Entra, we
+// advertise THIS server as the authorization server, strip `resource`, and forward the
+// requests to Entra. We never see the client secret persistently and store no tokens —
+// authorize is a 302 redirect and token is a transparent form forward.
 
 import express from "express";
 import dotenv from "dotenv";
@@ -14,28 +22,94 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, ""); // strip trailing slash
 
 if (!PUBLIC_URL) {
-  console.error("PUBLIC_URL is not set in .env — set it to your tunnel URL and restart.");
+  console.error("PUBLIC_URL is not set in .env — set it to your public HTTPS URL and restart.");
   process.exit(1);
 }
 
+// Entra v2.0 endpoints (multi-tenant + personal accounts via /common).
+const ENTRA_AUTHORIZE = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+const ENTRA_TOKEN = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+
+const GRAPH_SCOPES = [
+  "https://graph.microsoft.com/Mail.Send",
+  "offline_access",
+  "openid",
+  "profile",
+  "email",
+];
+
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // --- OAuth Protected Resource Metadata (RFC 9728) ---
-// Tells Claude: "Entra is the authorization server for this resource."
+// Points Claude at THIS server as the authorization server (which then proxies to Entra).
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
     resource: `${PUBLIC_URL}/mcp`,
-    authorization_servers: ["https://login.microsoftonline.com/common/v2.0"],
+    authorization_servers: [PUBLIC_URL],
     bearer_methods_supported: ["header"],
-    scopes_supported: [
-      "https://graph.microsoft.com/Mail.Send",
-      "offline_access",
-      "openid",
-      "profile",
-      "email",
-    ],
+    scopes_supported: GRAPH_SCOPES,
   });
+});
+
+// --- OAuth Authorization Server Metadata (RFC 8414) ---
+// Advertises our proxy's /authorize and /token endpoints. Served at both well-known paths
+// so clients that probe either one succeed.
+function authServerMetadata() {
+  return {
+    issuer: PUBLIC_URL,
+    authorization_endpoint: `${PUBLIC_URL}/authorize`,
+    token_endpoint: `${PUBLIC_URL}/token`,
+    response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: [
+      "client_secret_post",
+      "client_secret_basic",
+      "none",
+    ],
+    scopes_supported: GRAPH_SCOPES,
+  };
+}
+app.get("/.well-known/oauth-authorization-server", (req, res) => res.json(authServerMetadata()));
+app.get("/.well-known/openid-configuration", (req, res) => res.json(authServerMetadata()));
+
+// --- OAuth proxy: /authorize ---
+// Strip the unsupported `resource` param, then redirect the browser to Entra's authorize
+// endpoint. Entra redirects back to Claude's registered callback directly (not through us),
+// so PKCE + state flow end-to-end with Entra untouched.
+app.get("/authorize", (req, res) => {
+  const params = new URLSearchParams(req.query);
+  params.delete("resource");
+  res.redirect(`${ENTRA_AUTHORIZE}?${params.toString()}`);
+});
+
+// --- OAuth proxy: /token ---
+// Strip `resource`, forward the form body to Entra's token endpoint, relay the response
+// verbatim. Preserves client auth whether sent in the body or as a Basic Authorization header.
+app.post("/token", async (req, res) => {
+  const params = new URLSearchParams(req.body);
+  params.delete("resource");
+
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  if (req.headers.authorization) headers.Authorization = req.headers.authorization;
+
+  try {
+    const entraRes = await fetch(ENTRA_TOKEN, {
+      method: "POST",
+      headers,
+      body: params.toString(),
+    });
+    const text = await entraRes.text();
+    res
+      .status(entraRes.status)
+      .set("Content-Type", entraRes.headers.get("content-type") || "application/json")
+      .send(text);
+  } catch (err) {
+    res.status(502).json({ error: "server_error", error_description: String(err) });
+  }
 });
 
 // --- MCP tool definitions ---
@@ -158,6 +232,7 @@ app.post("/mcp", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`MCP server listening on port ${PORT}`);
-  console.log(`Public URL configured as: ${PUBLIC_URL || "(not set yet)"}`);
+  console.log(`Public URL configured as: ${PUBLIC_URL}`);
   console.log(`PRM endpoint: ${PUBLIC_URL}/.well-known/oauth-protected-resource`);
+  console.log(`OAuth proxy: ${PUBLIC_URL}/authorize  ${PUBLIC_URL}/token`);
 });

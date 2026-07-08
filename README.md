@@ -18,9 +18,21 @@ to Graph.
 ## Endpoints
 
 - `GET /.well-known/oauth-protected-resource` — OAuth Protected Resource
-  Metadata (RFC 9728). Points Claude at Entra as the auth server.
+  Metadata (RFC 9728). Points Claude at **this server** as the auth server.
+- `GET /.well-known/oauth-authorization-server` (and `/openid-configuration`) —
+  OAuth Authorization Server Metadata (RFC 8414). Advertises the proxy endpoints.
+- `GET /authorize` / `POST /token` — **OAuth proxy** to Microsoft Entra.
 - `POST /mcp` — MCP Streamable HTTP endpoint (stateless). Requires
   `Authorization: Bearer <token>`; returns `401` + `WWW-Authenticate` otherwise.
+
+### Why the OAuth proxy?
+
+Claude (like all MCP clients) includes the RFC 8707 `resource` parameter in the
+OAuth authorize/token requests. Entra's v2.0 endpoint rejects `resource` outright
+(`AADSTS901002` / `AADSTS9010010`). So this server advertises itself as the
+authorization server, **strips the `resource` parameter**, and forwards the
+requests to Entra. It remains stateless — `/authorize` is a 302 redirect and
+`/token` is a transparent form forward; no tokens or secrets are stored.
 
 ## Run locally
 
