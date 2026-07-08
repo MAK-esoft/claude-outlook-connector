@@ -114,6 +114,35 @@ app.post("/token", async (req, res) => {
   }
 });
 
+// --- Graph helpers ---
+// Pull the delegated Graph bearer token off the incoming MCP request.
+function extractBearer(extra) {
+  const authHeader = extra?.requestInfo?.headers?.authorization;
+  return typeof authHeader === "string"
+    ? authHeader.replace(/^Bearer\s+/i, "")
+    : undefined;
+}
+
+// GET against Graph v1.0 with the relayed token. `path` starts with "/".
+async function graphGet(token, path, extraHeaders = {}) {
+  return fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { Authorization: `Bearer ${token}`, ...extraHeaders },
+  });
+}
+
+// Compact one message record into a readable line for the model/user.
+function formatMessage(m) {
+  const from = m.from?.emailAddress
+    ? `${m.from.emailAddress.name || ""} <${m.from.emailAddress.address || ""}>`.trim()
+    : "(unknown sender)";
+  const when = m.receivedDateTime || "";
+  const unread = m.isRead === false ? " [UNREAD]" : "";
+  const preview = (m.bodyPreview || "").replace(/\s+/g, " ").slice(0, 140);
+  return `- ${when}${unread}\n  From: ${from}\n  Subject: ${m.subject || "(no subject)"}\n  ${preview}`;
+}
+
+const MESSAGE_SELECT = "subject,from,receivedDateTime,isRead,bodyPreview";
+
 // --- MCP tool definitions ---
 function buildServer() {
   const server = new McpServer({
@@ -160,11 +189,7 @@ function buildServer() {
         };
       }
 
-      const authHeader = extra?.requestInfo?.headers?.authorization;
-      const bearerToken = typeof authHeader === "string"
-        ? authHeader.replace(/^Bearer\s+/i, "")
-        : undefined;
-
+      const bearerToken = extractBearer(extra);
       if (!bearerToken) {
         return {
           content: [{ type: "text", text: "No access token available — the connector may need to be reconnected." }],
@@ -197,6 +222,120 @@ function buildServer() {
         content: [{ type: "text", text: `Graph API error (${graphRes.status}): ${errorText}` }],
         isError: true,
       };
+    }
+  );
+
+  server.tool(
+    "get_email_count",
+    "Returns how many emails are in a mail folder. For a named folder returns total and unread counts; use folder='all' for the total across the whole mailbox.",
+    {
+      folder: z
+        .string()
+        .optional()
+        .describe(
+          "Folder to count. Well-known names: inbox (default), sentitems, drafts, deleteditems, junkemail, archive. Use 'all' for the entire mailbox."
+        ),
+    },
+    async ({ folder }, extra) => {
+      const token = extractBearer(extra);
+      if (!token) {
+        return { content: [{ type: "text", text: "No access token available — reconnect the connector." }], isError: true };
+      }
+
+      const target = (folder || "inbox").trim();
+
+      if (target.toLowerCase() === "all") {
+        const res = await graphGet(token, "/me/messages/$count", { ConsistencyLevel: "eventual" });
+        const text = await res.text();
+        if (!res.ok) {
+          return { content: [{ type: "text", text: `Graph API error (${res.status}): ${text}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Total emails in mailbox: ${text.trim()}` }] };
+      }
+
+      const res = await graphGet(token, `/me/mailFolders/${encodeURIComponent(target)}`);
+      const body = await res.text();
+      if (!res.ok) {
+        return { content: [{ type: "text", text: `Graph API error (${res.status}): ${body}` }], isError: true };
+      }
+      const f = JSON.parse(body);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Folder "${f.displayName || target}": ${f.totalItemCount} total, ${f.unreadItemCount} unread.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "list_recent_emails",
+    "Lists the most recent emails in a folder (subject, sender, date, read/unread, preview). Reads only — sends and changes nothing.",
+    {
+      count: z.number().int().min(1).max(50).optional().describe("How many messages to return (default 10, max 50)."),
+      folder: z
+        .string()
+        .optional()
+        .describe("Folder to list. Well-known names: inbox (default), sentitems, drafts, etc. Use 'all' for across the whole mailbox."),
+    },
+    async ({ count, folder }, extra) => {
+      const token = extractBearer(extra);
+      if (!token) {
+        return { content: [{ type: "text", text: "No access token available — reconnect the connector." }], isError: true };
+      }
+
+      const top = count || 10;
+      const target = (folder || "inbox").trim();
+      const base =
+        target.toLowerCase() === "all"
+          ? "/me/messages"
+          : `/me/mailFolders/${encodeURIComponent(target)}/messages`;
+      const path = `${base}?$top=${top}&$select=${MESSAGE_SELECT}&$orderby=receivedDateTime%20desc`;
+
+      const res = await graphGet(token, path);
+      const body = await res.text();
+      if (!res.ok) {
+        return { content: [{ type: "text", text: `Graph API error (${res.status}): ${body}` }], isError: true };
+      }
+      const items = JSON.parse(body).value || [];
+      if (items.length === 0) {
+        return { content: [{ type: "text", text: `No emails found in "${target}".` }] };
+      }
+      const list = items.map(formatMessage).join("\n\n");
+      return { content: [{ type: "text", text: `${items.length} most recent in "${target}":\n\n${list}` }] };
+    }
+  );
+
+  server.tool(
+    "search_emails",
+    "Searches the mailbox for emails matching a query (matches subject, sender, and body). Reads only — sends and changes nothing.",
+    {
+      query: z.string().min(1).describe("Search text, e.g. a keyword, sender name, or 'from:alice@example.com'."),
+      count: z.number().int().min(1).max(50).optional().describe("Max results to return (default 10, max 50)."),
+    },
+    async ({ query, count }, extra) => {
+      const token = extractBearer(extra);
+      if (!token) {
+        return { content: [{ type: "text", text: "No access token available — reconnect the connector." }], isError: true };
+      }
+
+      const top = count || 10;
+      // $search cannot be combined with $orderby; results come back by relevance.
+      const path = `/me/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=${MESSAGE_SELECT}`;
+
+      const res = await graphGet(token, path, { ConsistencyLevel: "eventual" });
+      const body = await res.text();
+      if (!res.ok) {
+        return { content: [{ type: "text", text: `Graph API error (${res.status}): ${body}` }], isError: true };
+      }
+      const items = JSON.parse(body).value || [];
+      if (items.length === 0) {
+        return { content: [{ type: "text", text: `No emails matched "${query}".` }] };
+      }
+      const list = items.map(formatMessage).join("\n\n");
+      return { content: [{ type: "text", text: `${items.length} result(s) for "${query}":\n\n${list}` }] };
     }
   );
 

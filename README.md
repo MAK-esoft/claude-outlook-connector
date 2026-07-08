@@ -14,6 +14,19 @@ to Graph.
 - **`preview_email`** — formats a draft for review. Sends nothing.
 - **`send_email`** — sends via the authenticated user's mailbox, but **only if
   `confirmed: true`**. Two separate tools by design (no auto-send).
+- **`get_email_count`** — total/unread count for a folder (`inbox` default; use
+  `all` for the whole mailbox). Read-only.
+- **`list_recent_emails`** — most recent messages in a folder (subject, sender,
+  date, read state, preview). Read-only.
+- **`search_emails`** — search the mailbox by keyword/sender. Read-only.
+
+### Required Graph permissions (delegated)
+
+- `Mail.Send` — `preview_email` / `send_email`
+- `Mail.Read` — `get_email_count` / `list_recent_emails` / `search_emails`
+
+Add these under the Entra app registration → API permissions, and reconnect the
+connector in Claude so the new scopes are consented.
 
 ## Endpoints
 
