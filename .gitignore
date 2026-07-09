@@ -1,5 +1,7 @@
 node_modules/
 .env
+vault.enc.json
+vault.enc.json.*
 
 # Deployment tooling & secrets — never pushed to GitHub
 .claude/

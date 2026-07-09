@@ -1,78 +1,80 @@
-# Claude Email Connector (MCP Server)
+# Multi-Account Email Connector (MCP)
 
-A stateless remote [MCP](https://modelcontextprotocol.io) server that lets Claude
-send email from a Microsoft mailbox via Microsoft Graph `/me/sendMail`.
+A remote [MCP](https://modelcontextprotocol.io) server that lets an AI assistant
+(**Claude _and_ ChatGPT**, unchanged) **send and read email across many
+mailboxes and providers** — Microsoft/Outlook and Google/Gmail, including
+custom-domain addresses hosted on either.
 
-Microsoft Entra is the OAuth authorization server. When a user connects this
-connector in Claude, Claude runs OAuth against Entra and sends the resulting
-delegated Graph access token as a bearer token on every tool call. **This server
-stores no tokens and has no refresh logic** — it relays the bearer token straight
-to Graph.
+Unlike a single-identity connector, credentials live in a **server-side
+encrypted vault**: each mailbox owner enrolls once, and afterwards the assistant
+can act on any enrolled mailbox by naming its `from` address — no reconnect per
+account.
+
+## How it works — two auth layers
+
+- **Layer A — Operator auth:** the human using Claude/ChatGPT signs in through a
+  standard OAuth authorization server (Auth0 / Entra External ID / Okta /
+  Cognito). Their JWT gates every `/mcp` call (validated by signature, issuer,
+  audience, expiry, scope, then an allowlist). This is the only platform-aware
+  surface, and it's built to a spec both platforms implement.
+- **Layer B — Mailbox vault:** per-address refresh tokens, collected via the
+  enrollment portal, encrypted at rest (AES-256-GCM). At send/read time the
+  server mints a fresh access token and calls the correct provider API.
 
 ## Tools
 
-- **`preview_email`** — formats a draft for review. Sends nothing.
-- **`send_email`** — sends via the authenticated user's mailbox, but **only if
-  `confirmed: true`**. Two separate tools by design (no auto-send).
-- **`get_email_count`** — total/unread count for a folder (`inbox` default; use
-  `all` for the whole mailbox). Read-only.
-- **`list_recent_emails`** — most recent messages in a folder (subject, sender,
-  date, read state, preview). Read-only.
-- **`search_emails`** — search the mailbox by keyword/sender. Read-only.
+| Tool | What it does |
+|---|---|
+| `list_accounts` | Lists enrolled mailboxes to choose a sender/target |
+| `preview_email` | Formats a draft for review — sends nothing |
+| `send_email` | Sends from an enrolled mailbox; only when `confirmed: true` |
+| `check_inbox` | Total/unread counts, one mailbox or all combined |
+| `list_recent_emails` | Recent mail, per mailbox or merged across all, newest first |
+| `search_emails` | Keyword/sender search, per mailbox or across all |
+| `read_email` | Opens a full message body by ref id |
 
-### Required Graph permissions (delegated)
+Read tools take an optional `account`; omit it to act across **all** enrolled
+mailboxes collectively, or pass one address to scope to a single mailbox.
 
-- `Mail.Send` — `preview_email` / `send_email`
-- `Mail.Read` — `get_email_count` / `list_recent_emails` / `search_emails`
+> **Scope note:** this build requests **read** access too (`Mail.Read` /
+> `gmail.readonly`), a deliberate expansion of the spec's send-only default so
+> the read tools work. Set `ENABLE_READ_SCOPES=false` to revert to send-only.
 
-Add these under the Entra app registration → API permissions, and reconnect the
-connector in Claude so the new scopes are consented.
+## Layout
 
-## Endpoints
-
-- `GET /.well-known/oauth-protected-resource` — OAuth Protected Resource
-  Metadata (RFC 9728). Points Claude at **this server** as the auth server.
-- `GET /.well-known/oauth-authorization-server` (and `/openid-configuration`) —
-  OAuth Authorization Server Metadata (RFC 8414). Advertises the proxy endpoints.
-- `GET /authorize` / `POST /token` — **OAuth proxy** to Microsoft Entra.
-- `POST /mcp` — MCP Streamable HTTP endpoint (stateless). Requires
-  `Authorization: Bearer <token>`; returns `401` + `WWW-Authenticate` otherwise.
-
-### Why the OAuth proxy?
-
-Claude (like all MCP clients) includes the RFC 8707 `resource` parameter in the
-OAuth authorize/token requests. Entra's v2.0 endpoint rejects `resource` outright
-(`AADSTS901002` / `AADSTS9010010`). So this server advertises itself as the
-authorization server, **strips the `resource` parameter**, and forwards the
-requests to Entra. It remains stateless — `/authorize` is a 302 redirect and
-`/token` is a transparent form forward; no tokens or secrets are stored.
-
-## Run locally
-
-```bash
-npm install
-# set PUBLIC_URL to your public HTTPS URL, then:
-node server.js
+```
+server.js                  Express entry: enrollment + PRM + /mcp
+src/crypto.js              AES-256-GCM helpers
+src/vault.js               encrypted credential store
+src/operatorAuth.js        JWT/JWKS validation + allowlist (Layer A)
+src/enrollment.js          /enroll portal (Layer B onboarding)
+src/mx.js                  optional MX provider hint
+src/mcp.js                 MCP server + tools
+src/providers/             microsoft.js, google.js, index.js (adapters)
+PLATFORM_NOTES.md          per-platform (Claude vs ChatGPT) setup
 ```
 
-## Deploy (free tier)
+## Run (dev)
 
-1. Push this repo to your host (Render / Railway / Fly.io / etc.).
-2. Set environment variables on the host:
-   - `PUBLIC_URL` = the app's public HTTPS URL, e.g. `https://your-app.onrender.com` (no trailing slash).
-   - `PORT` is usually injected by the host automatically; the server honors it.
-3. Start command: `node server.js`
-4. Verify `https://<your-app>/.well-known/oauth-protected-resource` returns raw JSON.
-
-## Connect in Claude
-
-claude.ai → Settings → Connectors → Add custom connector:
-
-- **URL:** `https://<your-app>/mcp`
-- **Advanced settings:** paste your Entra **Application (client) ID** and **client
-  secret value**. These live in Claude only — never in this server.
+1. `npm install`
+2. Create `.env` from `.env.example`. Generate the vault key:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   ```
+   Fill Microsoft/Google client IDs+secrets and (before real use) the operator
+   auth values. See the spec's Section 3 for the console setup each requires.
+3. `node server.js` (or `npm start`), expose it over public HTTPS (tunnel with a
+   **static** domain, or deploy).
+4. Enroll a mailbox at `<PUBLIC_URL>/enroll`.
+5. Connect the assistant — see **[PLATFORM_NOTES.md](PLATFORM_NOTES.md)**.
 
 ## Security
 
-Client ID/secret are **never** stored in this server or repo. `.env` is
-gitignored. The server only ever relays the per-request bearer token to Graph.
+- Refresh tokens encrypted at rest; `.env` and `vault.enc.json` are gitignored.
+- Full operator-token validation (not a decode shortcut) — required for ChatGPT.
+- Tokens are never logged; refresh failures surface a clear re-enroll message.
+- Two-tool confirmed-send model preserved (`preview_email` / `send_email`).
+- Optional `INGRESS_IP_ALLOWLIST` for defense-in-depth.
+
+⚠️ Until `OPERATOR_AUTH_ENABLED=true`, `/mcp` is open — startup prints a warning.
+Use throwaway test mailboxes only until operator auth is on.
