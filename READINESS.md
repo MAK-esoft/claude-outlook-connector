@@ -1,87 +1,107 @@
-# Readiness — Step-by-Step Setup & Test
+# Readiness — Pending Tasks Only
 
-Do these in order. Microsoft keys are already prepared in local `.env` — you only
-add **one Azure value**, the **Google keys**, and the **Auth0 values**.
+✅ Done: code pushed (`multi-emails-support`) · live at
+**https://claude-outlook-connector.onrender.com** (PRM ✓, /enroll ✓, all 7 tools ✓)
+· Render env vars set & fixed · **Azure done** · **Google done** ·
+end-to-end send/read verified · **multi-user support built** (login-gated
+enrollment, per-user mailbox ownership — verified locally, needs deploy).
 
-## 1. Push & deploy to Render
-1. Push branch `multi-emails-support` (ask Claude Code).
-2. Render → New → Web Service → repo `MAK-esoft/claude-outlook-connector`,
-   branch `multi-emails-support`, build `npm install`, start `npm start`.
-3. Note your URL → `<RENDER_URL>` (e.g. `https://xxx.onrender.com`).
+---
 
-## 2. Microsoft (2 minutes — keys mostly done)
-1. portal.azure.com → App registrations → your app → **Overview** → copy
-   **Application (client) ID** → this is `MS_CLIENT_ID` (secret already saved).
-2. **Authentication** → add Web redirect URI:
-   `<RENDER_URL>/enroll/callback/microsoft`
-3. **API permissions**: confirm `Mail.Send`, `Mail.Read`, `offline_access`,
-   `openid`, `profile`, `email`, `User.Read` (you already granted most).
+## 0. Deploy multi-user update (NEW — needs push + config)
+- [ ] Ask Claude Code to push the multi-user changes to `multi-emails-support`
+      (Render auto-deploys)
+- [ ] Render env → ADD two new vars:
+      `AUTH0_CLIENT_ID` = `u6i8OSm8BPvuAaALQGmidQKCIsnAWTlI`
+      `AUTH0_CLIENT_SECRET` = (in local `.env`)
+- [ ] Auth0 → Applications → your app → **Allowed Callback URLs** → ADD:
+      `https://claude-outlook-connector.onrender.com/enroll/auth/callback`
+      (alongside the Claude/ChatGPT ones already there)
+- [ ] After deploy: `/enroll` now shows **Sign in / create account** instead of
+      the mailbox list — each user logs in with Auth0 and sees only their own
+      mailboxes. Re-enroll your test mailboxes under your login (redeploy wiped
+      them anyway).
+- [ ] Verify isolation: sign into `/enroll` with a second Auth0 account → its
+      mailbox list is empty; in Claude, `list_accounts` shows only the mailboxes
+      of whoever connected the MCP.
 
-## 3. Google (you set this up)
-1. console.cloud.google.com → create/pick project → **Enable Gmail API**.
-2. **OAuth consent screen** (External) → add your Gmail test address as **Test user**.
-3. **Credentials → Create OAuth client ID → Web application** → redirect URI:
-   `<RENDER_URL>/enroll/callback/google`
-4. Copy → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+---
 
-## 4. Auth0 (operator login for Claude/ChatGPT)
-1. auth0.com free account → **APIs → Create API** → Identifier = `<RENDER_URL>/mcp`, RS256.
-2. Tenant **Settings → Advanced** → enable **OIDC Dynamic Application Registration**.
-3. Note: `OPERATOR_ISSUER` = `https://<tenant>.<region>.auth0.com/` (keep trailing `/`),
-   `OPERATOR_JWKS_URL` = issuer + `.well-known/jwks.json`,
-   `OPERATOR_AUDIENCE` = `<RENDER_URL>/mcp`.
+## 1. Auth0 setup  ← YOU ARE HERE (last dashboard task)
 
-## 5. Render environment variables
-```
-PUBLIC_URL=<RENDER_URL>
-VAULT_ENCRYPTION_KEY=<from local .env — never commit this value>
-VAULT_STORE_PATH=./vault.enc.json
-MS_CLIENT_ID=<from step 2.1>
-MS_CLIENT_SECRET=<in local .env>
-GOOGLE_CLIENT_ID=<step 3>
-GOOGLE_CLIENT_SECRET=<step 3>
-ENABLE_READ_SCOPES=true
-OPERATOR_AUTH_ENABLED=false        # flip true after step 7
-OPERATOR_ISSUER=<step 4>
-OPERATOR_JWKS_URL=<step 4>
-OPERATOR_AUDIENCE=<RENDER_URL>/mcp
-OPERATOR_ALLOWLIST=<your email used to log into Auth0>
-```
-(Don't set PORT — Render injects it.)
+Auth0 is the login gate for the connector: when you click **Connect** in
+Claude/ChatGPT you'll sign into Auth0, and the server verifies that token on
+every call. Three things to configure, all in **manage.auth0.com**:
 
-## 6. Smoke test
-- `<RENDER_URL>/.well-known/oauth-protected-resource` → JSON ✅
-- `<RENDER_URL>/enroll` → page with 2 buttons ✅
+### 1a. Create the API (tells Auth0 our server exists)
+- Left sidebar → **Applications → APIs** → **Create API**
+- **Name:** anything, e.g. `mail-connector`
+- **Identifier:** `https://claude-outlook-connector.onrender.com/mcp`
+  (paste exactly — this is the "audience" written into every token; our server
+  rejects tokens whose audience doesn't match)
+- **Signing algorithm:** RS256 → **Create**
 
-## 7. Enroll test mailboxes (throwaway accounts, auth still off)
-- `/enroll` → **Add Microsoft account** → sign in → appears in list.
-- `/enroll` → **Add Google account** → sign in → appears in list.
+### 1b. Set the tenant Default Audience (makes tokens verifiable)
+- Left sidebar → **Settings** (tenant settings) → **General** tab →
+  scroll to **API Authorization Settings**
+- **Default Audience:** `https://claude-outlook-connector.onrender.com/mcp`
+- Save.
+- *Why:* Claude/ChatGPT don't send an "audience" parameter when they request a
+  token. Without a default, Auth0 issues an opaque token our server can't
+  verify → endless 401s. With it, every token is a proper JWT for our API.
 
-## 8. Enable security, then connect
-1. Render env: `OPERATOR_AUTH_ENABLED=true` → redeploy.
-   `curl -X POST <RENDER_URL>/mcp` should now return **401**.
-2. **Claude:** Settings → Connectors → Add custom → `<RENDER_URL>/mcp` →
-   Connect → Auth0 login → done.
-3. **ChatGPT** (Business/Enterprise/Edu + Developer Mode): Settings → Connectors →
-   Create → `<RENDER_URL>/mcp` → OAuth → Scan tools → Create → publish.
+### 1c. Allow the platforms' callback URLs on your Application
+- Left sidebar → **Applications → Applications** → the app whose Client ID is
+  `u6i8OSm8…` → **Settings** tab → **Allowed Callback URLs** — paste all three,
+  comma-separated:
+  ```
+  https://claude.ai/api/mcp/auth_callback, https://claude.com/api/mcp/auth_callback, https://chatgpt.com/connector_platform_oauth_redirect
+  ```
+- Save (bottom of page).
+- *Why:* after you log in, Auth0 redirects the browser back to Claude/ChatGPT.
+  Auth0 only redirects to URLs on this list — missing entry = "Callback URL
+  mismatch" error at login.
 
-## 9. Test prompts (run in Claude, then ChatGPT)
-1. "Which mailboxes can you use?" → lists both.
-2. "Draft an email from <outlook-test> to me, subject 'Test', body 'hello'" → preview only.
-3. "Send it." → arrives + in Sent Items. Repeat from the Gmail address.
-4. "How many unread emails across all my mailboxes?" → combined counts.
-5. "Show my 5 most recent emails" → merged cards from both inboxes.
-6. "Search all my mail for invoice" → results; "open the first one" → full body.
+### 1d. Make sure tokens carry your email (for the allowlist)
+- Same Application → Settings: no change needed normally — the `email` claim is
+  included when the login requests the `openid profile email` scopes (both
+  platforms do). Just ensure `OPERATOR_ALLOWLIST` on Render is the exact email
+  you sign into Auth0 with (Google-login email counts, if you used
+  "Continue with Google").
 
-## 10. Later: move to Hostinger
-1. Same steps, new URL (e.g. `https://outlook-mcp.srv1802008.hstgr.cloud`):
-   add that redirect URI in Microsoft + Google, new Auth0 API audience, same
-   `VAULT_ENCRYPTION_KEY` (keeps enrollments), `.env` on server, pm2 + reverse proxy.
-2. Re-point Claude/ChatGPT connectors to the new `/mcp` URL (remove + re-add).
+## 2. Enroll test mailboxes (auth still off — do BEFORE flipping auth if you like, or after; enrollment is unaffected by operator auth)
+- [ ] https://claude-outlook-connector.onrender.com/enroll → **Add Microsoft account** → appears in list
+- [ ] Same page → **Add Google account** → appears in list
+
+## 3. Enable security
+- [ ] Render env: `OPERATOR_AUTH_ENABLED=true` → redeploy
+- [ ] `POST /mcp` now returns **401** (ask Claude Code to verify)
+- ⚠️ Redeploy wipes Render's free disk → enrollments from step 2 vanish.
+  Either enroll AFTER this step, or accept re-enrolling.
+
+## 4. Connect the platforms
+- [ ] **Claude:** Settings → Connectors → Add custom →
+      `https://claude-outlook-connector.onrender.com/mcp` → Advanced settings:
+      Auth0 Client ID/Secret (in local `.env` comments) → Connect → Auth0 login
+- [ ] **ChatGPT** (Business/Enterprise/Edu + Developer Mode): Add custom connector →
+      same `/mcp` URL → OAuth (same Auth0 creds) → Scan tools → publish
+
+## 5. Functional tests (Claude first, then ChatGPT)
+- [ ] "Which mailboxes can you use?" → lists both
+- [ ] Draft from Outlook address → preview only; "Send it" → arrives + Sent Items
+- [ ] Same from Gmail address
+- [ ] "Unread across all my mailboxes?" → combined counts
+- [ ] "Show my 5 most recent emails" → merged cards from both inboxes
+- [ ] "Search all my mail for <word>" → results; "open the first one" → full body
+
+## 6. Later: Hostinger
+- [ ] New URL: add its redirect URIs in Azure + Google, new Auth0 API audience,
+      same `VAULT_ENCRYPTION_KEY`, `.env` on server, pm2 + reverse proxy,
+      re-point connectors to the new `/mcp`
 
 ## Gotchas
-- Render free disk is **wiped on restart** → enrolled mailboxes vanish → re-enroll
-  (or add a Render persistent disk and set `VAULT_STORE_PATH=/data/vault.enc.json`).
-- Render sleeps ~15 min idle → first request slow; retry once.
-- Google app in Testing: refresh tokens die after **7 days**, test users only.
-- Any URL change ⇒ update redirect URIs in **all** consoles.
+- Render free disk wipes on every restart/redeploy → enrollments vanish → re-enroll
+  (persistent disk + `VAULT_STORE_PATH=/data/vault.enc.json` fixes permanently)
+- Render sleeps ~15 min idle → first request slow, retry once
+- Google app in Testing: refresh tokens expire after **7 days**, test users only
+- Auth0 "Callback URL mismatch" at login → the URL list in 1c is missing/typo'd

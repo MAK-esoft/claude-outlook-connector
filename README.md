@@ -10,16 +10,21 @@ encrypted vault**: each mailbox owner enrolls once, and afterwards the assistant
 can act on any enrolled mailbox by naming its `from` address — no reconnect per
 account.
 
-## How it works — two auth layers
+## How it works — two auth layers, multi-user
 
 - **Layer A — Operator auth:** the human using Claude/ChatGPT signs in through a
   standard OAuth authorization server (Auth0 / Entra External ID / Okta /
   Cognito). Their JWT gates every `/mcp` call (validated by signature, issuer,
-  audience, expiry, scope, then an allowlist). This is the only platform-aware
-  surface, and it's built to a spec both platforms implement.
+  audience, expiry, scope, then an optional allowlist). This is the only
+  platform-aware surface, and it's built to a spec both platforms implement.
 - **Layer B — Mailbox vault:** per-address refresh tokens, collected via the
   enrollment portal, encrypted at rest (AES-256-GCM). At send/read time the
   server mints a fresh access token and calls the correct provider API.
+
+**Multi-user:** the enrollment portal requires the same Auth0 login (set
+`AUTH0_CLIENT_ID`/`AUTH0_CLIENT_SECRET`). Every enrolled mailbox is owned by the
+account that enrolled it, and `/mcp` tools are scoped to the operator's identity
+— many people can use one deployment, each seeing only their own mailboxes.
 
 ## Tools
 

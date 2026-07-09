@@ -1,6 +1,10 @@
-// Encrypted-at-rest credential vault, keyed by lowercased email.
+// Encrypted-at-rest credential vault — MULTI-TENANT.
+// Every record belongs to an `owner` (the Auth0 email of the person who
+// enrolled it), and every query is scoped by owner. Keyed by "owner:email" so
+// two users can independently enroll even the same shared mailbox.
+//
 // Record shape on disk:
-//   { email, provider, label, refresh_token_enc, created_at, updated_at }
+//   { owner, email, provider, label, refresh_token_enc, created_at, updated_at }
 // The refresh token is the ONLY encrypted field; everything else is metadata.
 // Loaded into memory on startup, write-through on every mutation.
 import fs from "fs";
@@ -9,7 +13,12 @@ import { encrypt, decrypt } from "./crypto.js";
 
 const STORE_PATH = path.resolve(process.env.VAULT_STORE_PATH || "./vault.enc.json");
 
-/** @type {Map<string, object>} email(lowercased) -> record */
+// Legacy/dev records (or auth-off smoke tests) fall under this owner.
+export const DEV_OWNER = "dev@local";
+
+const keyOf = (owner, email) => `${String(owner).toLowerCase()}:${String(email).toLowerCase()}`;
+
+/** @type {Map<string, object>} "owner:email" -> record */
 let accounts = new Map();
 
 function load() {
@@ -24,9 +33,13 @@ function load() {
       return;
     }
     const arr = JSON.parse(raw);
-    accounts = new Map(arr.map((r) => [r.email.toLowerCase(), r]));
+    accounts = new Map(
+      arr.map((r) => {
+        const rec = { owner: (r.owner || DEV_OWNER).toLowerCase(), ...r, email: r.email.toLowerCase() };
+        return [keyOf(rec.owner, rec.email), rec];
+      })
+    );
   } catch (err) {
-    // Fail loud but without leaking anything sensitive.
     throw new Error(`Failed to load vault store at ${STORE_PATH}: ${err.message}`);
   }
 }
@@ -40,46 +53,56 @@ function persist() {
 
 load();
 
-/** Upsert an account, encrypting its refresh token. */
-export function putAccount({ email, provider, label, refreshToken }) {
-  const key = email.toLowerCase();
+/** Upsert an account for an owner, encrypting its refresh token. */
+export function putAccount({ owner, email, provider, label, refreshToken }) {
+  if (!owner) throw new Error("putAccount requires an owner");
+  const ownerKey = String(owner).toLowerCase();
+  const emailKey = String(email).toLowerCase();
   const now = new Date().toISOString();
-  const existing = accounts.get(key);
+  const existing = accounts.get(keyOf(ownerKey, emailKey));
   const record = {
-    email: key,
+    owner: ownerKey,
+    email: emailKey,
     provider,
     label: label || existing?.label || email,
     refresh_token_enc: encrypt(refreshToken),
     created_at: existing?.created_at || now,
     updated_at: now,
   };
-  accounts.set(key, record);
+  accounts.set(keyOf(ownerKey, emailKey), record);
   persist();
-  return { email: key, provider, label: record.label };
+  return { owner: ownerKey, email: emailKey, provider, label: record.label };
 }
 
-/** Full record (including encrypted token) or null. */
-export function getAccount(email) {
-  return accounts.get(String(email).toLowerCase()) || null;
+/** Full record (including encrypted token) or null — owner-scoped. */
+export function getAccount(email, owner) {
+  return accounts.get(keyOf(owner, email)) || null;
 }
 
-/** Decrypted refresh token or null. */
-export function getRefreshToken(email) {
-  const rec = accounts.get(String(email).toLowerCase());
+/** Decrypted refresh token or null — owner-scoped. */
+export function getRefreshToken(email, owner) {
+  const rec = accounts.get(keyOf(owner, email));
   if (!rec) return null;
   return decrypt(rec.refresh_token_enc);
 }
 
-/** Safe listing — NEVER includes tokens. */
-export function listAccounts() {
-  return [...accounts.values()].map(({ email, provider, label }) => ({ email, provider, label }));
+/** Safe listing for ONE owner — NEVER includes tokens. */
+export function listAccounts(owner) {
+  const ownerKey = String(owner || "").toLowerCase();
+  return [...accounts.values()]
+    .filter((r) => r.owner === ownerKey)
+    .map(({ email, provider, label }) => ({ email, provider, label }));
 }
 
-export function deleteAccount(email) {
-  const key = String(email).toLowerCase();
-  const existed = accounts.delete(key);
+export function deleteAccount(email, owner) {
+  const existed = accounts.delete(keyOf(owner, email));
   if (existed) persist();
   return existed;
+}
+
+/** Total enrolled mailboxes across ALL owners (startup logging only). */
+export function countAccounts() {
+  return accounts.size;
 }
 
 export function storePath() {

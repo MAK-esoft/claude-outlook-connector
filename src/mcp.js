@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getProvider } from "./providers/index.js";
-import { listAccounts, getAccount, getRefreshToken, putAccount } from "./vault.js";
+import { listAccounts, getAccount, getRefreshToken, putAccount, DEV_OWNER } from "./vault.js";
 
 const READ_ENABLED = process.env.ENABLE_READ_SCOPES === "true";
 const PUB = () => process.env.PUBLIC_URL || "";
@@ -21,13 +21,13 @@ function err(text) {
 
 // Mint a fresh access token for an enrolled mailbox, persisting rotated refresh
 // tokens. Returns { provider, providerName, accessToken } or { error }.
-async function freshToken(email) {
-  const account = getAccount(email);
+async function freshToken(email, owner) {
+  const account = getAccount(email, owner);
   if (!account) {
     return { error: `I couldn't find an enrolled mailbox for "${email}". You can add it at ${PUB()}/enroll, then try again.` };
   }
   const provider = getProvider(account.provider);
-  const refreshToken = getRefreshToken(email);
+  const refreshToken = getRefreshToken(email, owner);
   let refreshed;
   try {
     refreshed = await provider.refreshAccessToken(refreshToken);
@@ -37,14 +37,14 @@ async function freshToken(email) {
     };
   }
   if (refreshed.refreshToken) {
-    putAccount({ email, provider: account.provider, label: account.label, refreshToken: refreshed.refreshToken });
+    putAccount({ owner, email, provider: account.provider, label: account.label, refreshToken: refreshed.refreshToken });
   }
   return { provider, providerName: account.provider, accessToken: refreshed.accessToken };
 }
 
 // Resolve which accounts a read tool should touch: a specific one, or all.
-function resolveTargets(account) {
-  const all = listAccounts();
+function resolveTargets(account, owner) {
+  const all = listAccounts(owner);
   if (account && account.trim()) {
     const match = all.find((a) => a.email === account.trim().toLowerCase());
     return match ? [match] : [];
@@ -71,10 +71,10 @@ function renderList(messages, showAccount) {
 }
 
 // Run a read operation across targets in parallel; collect data + friendly errors.
-async function gather(targets, fn) {
+async function gather(targets, owner, fn) {
   const settled = await Promise.allSettled(
     targets.map(async (t) => {
-      const tok = await freshToken(t.email);
+      const tok = await freshToken(t.email, owner);
       if (tok.error) throw new Error(tok.error);
       const data = await fn(t, tok);
       return { email: t.email, provider: t.provider, data };
@@ -95,7 +95,10 @@ function errorFooter(errors) {
   return `\n\n---\n\n⚠️ I couldn't reach ${errors.length} mailbox(es):\n${lines.join("\n")}`;
 }
 
-export function buildServer() {
+export function buildServer(operator) {
+  // All vault access below is scoped to this operator's identity — one person's
+  // mailboxes are never visible to another operator.
+  const owner = (operator?.email || DEV_OWNER).toLowerCase();
   const server = new McpServer({ name: "multi-account-mail-connector", version: "2.0.0" });
 
   // ── list_accounts ────────────────────────────────────────────────────
@@ -104,7 +107,7 @@ export function buildServer() {
     "Lists the email mailboxes enrolled in this connector that can be used to send or read mail. Call this when the user hasn't named a specific 'from' address, then present the options warmly and ask which one they'd like to use.",
     {},
     async () => {
-      const accounts = listAccounts();
+      const accounts = listAccounts(owner);
       if (!accounts.length) {
         return ok(`There are no mailboxes enrolled yet. You can add one — Microsoft or Google — at ${PUB()}/enroll, and then I can send and check mail for it.`);
       }
@@ -124,7 +127,7 @@ export function buildServer() {
       body: z.string().describe("Email body text (plain text)"),
     },
     async ({ from, to, subject, body }) => {
-      const account = getAccount(from);
+      const account = getAccount(from, owner);
       if (!account) {
         return err(`I don't have "${from}" enrolled yet, so I can't draft from it. You can add it at ${PUB()}/enroll, or pick one of your enrolled addresses instead.`);
       }
@@ -154,7 +157,7 @@ export function buildServer() {
       if (confirmed !== true) {
         return ok(`I haven't sent anything yet — I'd like your explicit go-ahead first. Here's what I'm about to send:\n\n**From:** ${from}\n**To:** ${to}\n**Subject:** ${subject}\n\n${body}\n\nShall I send it?`);
       }
-      const tok = await freshToken(from);
+      const tok = await freshToken(from, owner);
       if (tok.error) return err(tok.error);
       try {
         await tok.provider.sendMail({ accessToken: tok.accessToken, from, to, subject, body });
@@ -175,9 +178,9 @@ export function buildServer() {
       account: z.string().optional().describe("Specific enrolled mailbox to check. Omit to summarize all enrolled mailboxes together."),
     },
     async ({ account }) => {
-      const targets = resolveTargets(account);
+      const targets = resolveTargets(account, owner);
       if (!targets.length) return err(account ? `"${account}" isn't enrolled. Try ${PUB()}/enroll or pick an enrolled address.` : `No mailboxes are enrolled yet — add one at ${PUB()}/enroll.`);
-      const { results, errors } = await gather(targets, async (t, tok) => tok.provider.getCounts({ accessToken: tok.accessToken }));
+      const { results, errors } = await gather(targets, owner, async (t, tok) => tok.provider.getCounts({ accessToken: tok.accessToken }));
       if (!results.length) return err(`I couldn't read any inboxes right now.${errorFooter(errors)}`);
       const totalUnread = results.reduce((n, r) => n + (r.data.unread || 0), 0);
       const rows = results.map((r) => `- **${r.email}** _(${r.provider})_: ${r.data.unread ?? "?"} unread of ${r.data.total ?? "?"} total`);
@@ -198,10 +201,10 @@ export function buildServer() {
       unread_only: z.boolean().optional().describe("If true, only unread messages."),
     },
     async ({ account, count, unread_only }) => {
-      const targets = resolveTargets(account);
+      const targets = resolveTargets(account, owner);
       if (!targets.length) return err(account ? `"${account}" isn't enrolled.` : `No mailboxes are enrolled yet — add one at ${PUB()}/enroll.`);
       const top = count || 10;
-      const { results, errors } = await gather(targets, async (t, tok) =>
+      const { results, errors } = await gather(targets, owner, async (t, tok) =>
         tok.provider.listRecent({ accessToken: tok.accessToken, top, unreadOnly: !!unread_only })
       );
       let messages = results.flatMap((r) => r.data.map((m) => ({ ...m, _account: r.email })));
@@ -224,10 +227,10 @@ export function buildServer() {
       count: z.number().int().min(1).max(50).optional().describe("Max results per mailbox (default 10)."),
     },
     async ({ query, account, count }) => {
-      const targets = resolveTargets(account);
+      const targets = resolveTargets(account, owner);
       if (!targets.length) return err(account ? `"${account}" isn't enrolled.` : `No mailboxes are enrolled yet — add one at ${PUB()}/enroll.`);
       const top = count || 10;
-      const { results, errors } = await gather(targets, async (t, tok) =>
+      const { results, errors } = await gather(targets, owner, async (t, tok) =>
         tok.provider.search({ accessToken: tok.accessToken, query, top })
       );
       let messages = results.flatMap((r) => r.data.map((m) => ({ ...m, _account: r.email })));
@@ -247,9 +250,9 @@ export function buildServer() {
       ref: z.string().min(1).describe("The message ref id shown by list_recent_emails / search_emails."),
     },
     async ({ account, ref }) => {
-      const targets = resolveTargets(account);
+      const targets = resolveTargets(account, owner);
       if (!targets.length) return err(`"${account}" isn't an enrolled mailbox.`);
-      const tok = await freshToken(account);
+      const tok = await freshToken(account, owner);
       if (tok.error) return err(tok.error);
       let m;
       try {

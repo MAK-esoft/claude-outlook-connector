@@ -8,7 +8,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { buildServer } from "./src/mcp.js";
 import { createEnrollmentRouter } from "./src/enrollment.js";
 import { requireOperator } from "./src/operatorAuth.js";
-import { listAccounts, storePath } from "./src/vault.js";
+import { countAccounts, storePath } from "./src/vault.js";
+import { loginEnabled } from "./src/enrollAuth.js";
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
@@ -56,7 +57,9 @@ app.get("/", (req, res) => {
 
 // ── MCP endpoint (operator-gated, stateless streamable HTTP) ──────────────
 app.post("/mcp", requireOperator, async (req, res) => {
-  const server = buildServer();
+  // req.operator (set by requireOperator) scopes every tool to the caller's
+  // own enrolled mailboxes. Without operator auth (dev), the shared dev owner is used.
+  const server = buildServer(req.operator);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     transport.close();
@@ -67,15 +70,16 @@ app.post("/mcp", requireOperator, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  const accounts = listAccounts();
+  const accountCount = countAccounts();
   console.log("─".repeat(64));
   console.log(`  multi-account-mail-connector listening on port ${PORT}`);
   console.log(`  Public URL:      ${PUBLIC_URL}`);
   console.log(`  Enrollment:      ${PUBLIC_URL}/enroll`);
   console.log(`  PRM metadata:    ${PUBLIC_URL}/.well-known/oauth-protected-resource`);
   console.log(`  MCP endpoint:    ${PUBLIC_URL}/mcp`);
-  console.log(`  Vault store:     ${storePath()}  (${accounts.length} account(s) enrolled)`);
+  console.log(`  Vault store:     ${storePath()}  (${accountCount} account(s) enrolled)`);
   console.log(`  Read tools:      ${READ_ENABLED ? "ENABLED (Mail.Read / gmail.readonly)" : "disabled (send-only)"}`);
+  console.log(`  Enrollment auth: ${loginEnabled() ? "ON (Auth0 login required; per-user mailboxes)" : "OFF (single shared dev owner — set AUTH0_CLIENT_ID/SECRET for multi-user)"}`);
   if (OPERATOR_AUTH_ENABLED) {
     console.log(`  Operator auth:   ON  (issuer ${process.env.OPERATOR_ISSUER || "??"})`);
   } else {
