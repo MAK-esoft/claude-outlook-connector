@@ -104,15 +104,19 @@ export function buildServer(operator) {
   // ── list_accounts ────────────────────────────────────────────────────
   server.tool(
     "list_accounts",
-    "Lists the email mailboxes enrolled in this connector that can be used to send or read mail. Call this when the user hasn't named a specific 'from' address, then present the options warmly and ask which one they'd like to use.",
+    "Lists the email mailboxes enrolled in this connector that can be used to send or read mail. Call this when the user hasn't named a specific 'from' address. PRESENTATION: render the returned markdown table to the user as-is (don't flatten it to prose), then ask which mailbox they'd like to use.",
     {},
     async () => {
       const accounts = listAccounts(owner);
       if (!accounts.length) {
         return ok(`There are no mailboxes enrolled yet. You can add one — Microsoft or Google — at ${PUB()}/enroll, and then I can send and check mail for it.`);
       }
-      const rows = accounts.map((a) => `- **${a.email}**  ·  _${a.provider}_${a.label && a.label !== a.email ? `  ·  ${a.label}` : ""}`);
-      return ok(`Here are the mailboxes I can work with:\n\n${rows.join("\n")}\n\nJust tell me which one to use (or say "all" to act across every mailbox for reading).`);
+      const table = [
+        `| Mailbox | Provider |`,
+        `|---|---|`,
+        ...accounts.map((a) => `| **${a.email}** | ${a.provider === "microsoft" ? "Microsoft (Outlook)" : a.provider === "google" ? "Google (Gmail)" : a.provider} |`),
+      ].join("\n");
+      return ok(`Here are the mailboxes I can work with:\n\n${table}\n\nJust tell me which one to use (or say "all" to act across every mailbox for reading).`);
     }
   );
 
@@ -173,7 +177,7 @@ export function buildServer(operator) {
   // ── check_inbox ──────────────────────────────────────────────────────
   server.tool(
     "check_inbox",
-    "Reports how many messages are in the inbox and how many are unread, for one mailbox or (if no account given) all enrolled mailboxes collectively. Present the numbers in a friendly one-or-two sentence summary.",
+    "Reports how many messages are in the inbox and how many are unread, for one mailbox or (if no account given) all enrolled mailboxes collectively. PRESENTATION: render the returned markdown table to the user as-is (don't flatten it to prose); add at most one friendly sentence around it.",
     {
       account: z.string().optional().describe("Specific enrolled mailbox to check. Omit to summarize all enrolled mailboxes together."),
     },
@@ -183,18 +187,24 @@ export function buildServer(operator) {
       const { results, errors } = await gather(targets, owner, async (t, tok) => tok.provider.getCounts({ accessToken: tok.accessToken }));
       if (!results.length) return err(`I couldn't read any inboxes right now.${errorFooter(errors)}`);
       const totalUnread = results.reduce((n, r) => n + (r.data.unread || 0), 0);
-      const rows = results.map((r) => `- **${r.email}** _(${r.provider})_: ${r.data.unread ?? "?"} unread of ${r.data.total ?? "?"} total`);
+      const totalAll = results.reduce((n, r) => n + (r.data.total || 0), 0);
+      const table = [
+        `| Mailbox | Provider | Unread | Total |`,
+        `|---|---|---:|---:|`,
+        ...results.map((r) => `| **${r.email}** | ${r.provider} | ${r.data.unread ?? "?"} | ${r.data.total ?? "?"} |`),
+        ...(results.length > 1 ? [`| **All mailboxes** | | **${totalUnread}** | **${totalAll}** |`] : []),
+      ].join("\n");
       const header = results.length > 1
         ? `Across your ${results.length} mailboxes you have **${totalUnread} unread** message(s):`
         : `Here's where **${results[0].email}** stands:`;
-      return ok(`${header}\n\n${rows.join("\n")}${errorFooter(errors)}`);
+      return ok(`${header}\n\n${table}${errorFooter(errors)}`);
     }
   );
 
   // ── list_recent_emails ───────────────────────────────────────────────
   server.tool(
     "list_recent_emails",
-    "Lists the most recent emails — for one mailbox or (if no account given) merged across all enrolled mailboxes, newest first. Reads only; never sends. Present the result as clean cards, and offer to open or reply to any of them.",
+    "Lists the most recent emails — for one mailbox or (if no account given) merged across all enrolled mailboxes, newest first. Reads only; never sends. PRESENTATION: the result is formatted as message cards (bold subject, meta line, snippet, ref) separated by dividers — render them to the user as-is rather than rewriting into prose, then offer to open, reply to, or act on any of them.",
     {
       account: z.string().optional().describe("Specific enrolled mailbox. Omit to merge recent mail across all mailboxes."),
       count: z.number().int().min(1).max(50).optional().describe("How many messages to return (default 10, max 50)."),
@@ -220,7 +230,7 @@ export function buildServer(operator) {
   // ── search_emails ────────────────────────────────────────────────────
   server.tool(
     "search_emails",
-    "Searches mail by keyword, sender, or phrase — in one mailbox or across all enrolled mailboxes. Reads only. Present matches as cards and summarize what was found.",
+    "Searches mail by keyword, sender, or phrase — in one mailbox or across all enrolled mailboxes. Reads only. PRESENTATION: results are formatted as message cards — render them as-is rather than rewriting into prose, with one summary sentence on top.",
     {
       query: z.string().min(1).describe("Search text (keyword, sender, or phrase)."),
       account: z.string().optional().describe("Specific enrolled mailbox. Omit to search all mailboxes."),
@@ -244,7 +254,7 @@ export function buildServer(operator) {
   // ── read_email ───────────────────────────────────────────────────────
   server.tool(
     "read_email",
-    "Opens the full body of a single email by its ref id (from list_recent_emails or search_emails) in a specific mailbox. Reads only. Present the message clearly and offer to help reply.",
+    "Opens the full body of a single email by its ref id (from list_recent_emails or search_emails) in a specific mailbox. Reads only. PRESENTATION: render the returned message block (subject, meta line, body) faithfully, then offer to reply, forward, or manage it.",
     {
       account: z.string().email().describe("The enrolled mailbox the message belongs to."),
       ref: z.string().min(1).describe("The message ref id shown by list_recent_emails / search_emails."),
