@@ -46,14 +46,8 @@ app.get("/.well-known/oauth-protected-resource/mcp", (req, res) => res.json(prot
 // ── Enrollment portal ─────────────────────────────────────────────────────
 app.use("/enroll", createEnrollmentRouter());
 
-// Friendly root.
-app.get("/", (req, res) => {
-  res.type("html").send(
-    `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;max-width:600px;margin:40px auto;padding:0 20px">
-     <h1>Multi-account mail connector</h1>
-     <p>Enroll a mailbox at <a href="/enroll">/enroll</a>. Connect the assistant at <code>${PUBLIC_URL}/mcp</code>.</p></body>`
-  );
-});
+// Root → portal.
+app.get("/", (req, res) => res.redirect("/enroll"));
 
 // ── MCP endpoint (operator-gated, stateless streamable HTTP) ──────────────
 app.post("/mcp", requireOperator, async (req, res) => {
