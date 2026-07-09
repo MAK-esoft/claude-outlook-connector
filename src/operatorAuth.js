@@ -77,14 +77,36 @@ export async function requireOperator(req, res, next) {
     const requiredScope = process.env.OPERATOR_REQUIRED_SCOPE;
     if (requiredScope) {
       const scopes = String(payload.scope || payload.scp || "").split(" ").filter(Boolean);
-      if (!scopes.includes(requiredScope)) return res.status(403).json({ error: "insufficient_scope" });
+      if (!scopes.includes(requiredScope)) {
+        console.warn(`operator auth rejected: missing required scope (sub=${payload.sub || "?"})`);
+        return res.status(403).json({ error: "insufficient_scope" });
+      }
     }
-    const email = String(payload.email || payload.preferred_username || "").toLowerCase();
-    if (allow.length && !allow.includes(email)) return res.status(403).json({ error: "operator_not_allowed" });
-    req.operator = { email: email || "(unknown)" };
+    // Auth0 access tokens carry no email claim by default — a post-login Action
+    // must add the namespaced claim below (see PLATFORM_NOTES.md). Standard
+    // claims are checked first for IdPs that do include them.
+    const email = String(
+      payload.email ||
+        payload["https://ultramail.app/email"] ||
+        payload.preferred_username ||
+        ""
+    ).toLowerCase();
+    if (!email) {
+      console.warn(
+        `operator auth rejected: token has no email claim (sub=${payload.sub || "?"}). ` +
+          "Add the post-login Action that sets https://ultramail.app/email on the access token."
+      );
+      return res.status(403).json({ error: "no_email_claim" });
+    }
+    if (allow.length && !allow.includes(email)) {
+      console.warn(`operator auth rejected: ${email} not in OPERATOR_ALLOWLIST`);
+      return res.status(403).json({ error: "operator_not_allowed" });
+    }
+    req.operator = { email };
     return next();
-  } catch {
-    // Never echo the token or internal error detail.
+  } catch (e) {
+    // Log the verification failure class (iss/aud/exp/signature) — never the token.
+    console.warn(`operator auth rejected: token verification failed (${e?.code || e?.name || "error"}: ${e?.message || ""})`);
     return res
       .status(401)
       .set("WWW-Authenticate", `Bearer error="invalid_token"`)
