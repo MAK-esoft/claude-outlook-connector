@@ -270,5 +270,101 @@ export function buildServer(operator) {
     }
   );
 
+  // ── reply_email ──────────────────────────────────────────────────────
+  server.tool(
+    "reply_email",
+    "Replies to an existing email in its thread, from the mailbox that received it. Only sends when confirmed=true — always show the user the reply text and get their approval first.",
+    {
+      account: z.string().email().describe("The enrolled mailbox the original message is in (the reply is sent from it)."),
+      ref: z.string().min(1).describe("The message ref id (from list_recent_emails / search_emails / read_email)."),
+      body: z.string().describe("The reply text (plain text)."),
+      confirmed: z.boolean().describe("Must be true. Set only after the user has explicitly approved this exact reply."),
+    },
+    async ({ account, ref, body, confirmed }) => {
+      if (confirmed !== true) {
+        return ok(`Here's the reply I'm ready to send from **${account}** — nothing has gone out yet:\n\n${body}\n\nShall I send it?`);
+      }
+      const tok = await freshToken(account, owner);
+      if (tok.error) return err(tok.error);
+      try {
+        await tok.provider.replyMessage({ accessToken: tok.accessToken, id: ref, comment: body, from: account });
+      } catch (e) {
+        return err(`I couldn't send that reply: ${e.message}. Nothing was sent.`);
+      }
+      return ok(`✅ Reply sent from **${account}**, in the same thread as the original message.`);
+    }
+  );
+
+  // ── forward_email ────────────────────────────────────────────────────
+  server.tool(
+    "forward_email",
+    "Forwards an existing email to a new recipient, optionally with a note on top. Only sends when confirmed=true — get the user's approval first.",
+    {
+      account: z.string().email().describe("The enrolled mailbox the original message is in."),
+      ref: z.string().min(1).describe("The message ref id (from list_recent_emails / search_emails / read_email)."),
+      to: z.string().email().describe("Who to forward it to."),
+      note: z.string().optional().describe("Optional note to add above the forwarded message."),
+      confirmed: z.boolean().describe("Must be true. Set only after the user has explicitly approved forwarding."),
+    },
+    async ({ account, ref, to, note, confirmed }) => {
+      if (confirmed !== true) {
+        return ok(`Ready to forward that message from **${account}** to **${to}**${note ? ` with your note:\n\n${note}` : ""}.\n\nNothing has been sent yet — shall I go ahead?`);
+      }
+      const tok = await freshToken(account, owner);
+      if (tok.error) return err(tok.error);
+      try {
+        await tok.provider.forwardMessage({ accessToken: tok.accessToken, id: ref, to, comment: note || "", from: account });
+      } catch (e) {
+        return err(`I couldn't forward that message: ${e.message}. Nothing was sent.`);
+      }
+      return ok(`✅ Forwarded to **${to}** from **${account}**.`);
+    }
+  );
+
+  // ── mark_email ───────────────────────────────────────────────────────
+  server.tool(
+    "mark_email",
+    "Marks an email as read or unread. Safe, reversible action.",
+    {
+      account: z.string().email().describe("The enrolled mailbox the message is in."),
+      ref: z.string().min(1).describe("The message ref id."),
+      read: z.boolean().describe("true = mark as read, false = mark as unread."),
+    },
+    async ({ account, ref, read }) => {
+      const tok = await freshToken(account, owner);
+      if (tok.error) return err(tok.error);
+      try {
+        await tok.provider.setRead({ accessToken: tok.accessToken, id: ref, read });
+      } catch (e) {
+        return err(`I couldn't update that message: ${e.message}`);
+      }
+      return ok(`Done — marked as ${read ? "read ○" : "unread ●"} in **${account}**.`);
+    }
+  );
+
+  // ── delete_email ─────────────────────────────────────────────────────
+  server.tool(
+    "delete_email",
+    "Moves an email to the Trash / Deleted Items folder (recoverable — never a permanent delete). Only acts when confirmed=true; confirm with the user first, naming the message.",
+    {
+      account: z.string().email().describe("The enrolled mailbox the message is in."),
+      ref: z.string().min(1).describe("The message ref id."),
+      confirmed: z.boolean().describe("Must be true. Set only after the user has explicitly approved deleting this message."),
+    },
+    async ({ account, ref, confirmed }) => {
+      if (confirmed !== true) {
+        return ok(`I'll move that message in **${account}** to Trash (it stays recoverable there). Just confirm and I'll do it.`);
+      }
+      const tok = await freshToken(account, owner);
+      if (tok.error) return err(tok.error);
+      try {
+        await tok.provider.trashMessage({ accessToken: tok.accessToken, id: ref });
+      } catch (e) {
+        return err(`I couldn't delete that message: ${e.message}`);
+      }
+      return ok(`🗑️ Moved to Trash in **${account}**. It can still be recovered from there if needed.`);
+    }
+  );
+
   return server;
 }

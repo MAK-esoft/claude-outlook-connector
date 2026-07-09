@@ -37,6 +37,10 @@ account that enrolled it, and `/mcp` tools are scoped to the operator's identity
 | `list_recent_emails` | Recent mail, per mailbox or merged across all, newest first |
 | `search_emails` | Keyword/sender search, per mailbox or across all |
 | `read_email` | Opens a full message body by ref id |
+| `reply_email` | Replies in-thread; only when `confirmed: true` |
+| `forward_email` | Forwards to a new recipient; only when `confirmed: true` |
+| `mark_email` | Marks read/unread (reversible) |
+| `delete_email` | Moves to Trash/Deleted Items (recoverable); only when `confirmed: true` |
 
 Read tools take an optional `account`; omit it to act across **all** enrolled
 mailboxes collectively, or pass one address to scope to a single mailbox.

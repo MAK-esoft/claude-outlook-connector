@@ -13,7 +13,9 @@ function scopeString() {
     "profile",
     "https://www.googleapis.com/auth/gmail.send",
   ];
-  if (READ) s.push("https://www.googleapis.com/auth/gmail.readonly");
+  // gmail.modify covers read + label changes + trash (everything except
+  // permanent deletion); gmail.readonly kept for least-surprise read paths.
+  if (READ) s.push("https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify");
   return s.join(" ");
 }
 
@@ -213,4 +215,93 @@ export async function getMessage({ accessToken, id }) {
     snippet: (m.snippet || "").replace(/\s+/g, " ").trim(),
     body: extractBody(m.payload),
   };
+}
+
+// ── Actions (require gmail.modify; reply/forward also use gmail.send) ──────
+// Fetch the headers needed for correct threading.
+async function threadContext(accessToken, id) {
+  const p = new URLSearchParams({ format: "metadata" });
+  ["Subject", "From", "Reply-To", "Message-ID", "References"].forEach((h) => p.append("metadataHeaders", h));
+  const res = await fetch(`${GMAIL}/messages/${encodeURIComponent(id)}?${p.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`Gmail message error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  const m = await res.json();
+  const hs = m.payload?.headers;
+  return {
+    threadId: m.threadId,
+    subject: header(hs, "Subject") || "",
+    from: header(hs, "Reply-To") || header(hs, "From") || "",
+    messageId: header(hs, "Message-ID") || "",
+    references: header(hs, "References") || "",
+  };
+}
+
+async function sendRaw(accessToken, raw, threadId) {
+  const body = threadId ? { raw: base64url(raw), threadId } : { raw: base64url(raw) };
+  const res = await fetch(`${GMAIL}/messages/send`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status !== 200) throw new Error(`Gmail send error (${res.status}): ${(await res.text()).slice(0, 300)}`);
+}
+
+export async function replyMessage({ accessToken, id, comment, from }) {
+  const ctx = await threadContext(accessToken, id);
+  const subject = /^re:/i.test(ctx.subject) ? ctx.subject : `Re: ${ctx.subject}`;
+  const raw = [
+    `From: ${from}`,
+    `To: ${ctx.from}`,
+    `Subject: ${subject}`,
+    ctx.messageId ? `In-Reply-To: ${ctx.messageId}` : null,
+    ctx.messageId ? `References: ${[ctx.references, ctx.messageId].filter(Boolean).join(" ")}` : null,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    comment,
+  ].filter((l) => l !== null).join("\r\n");
+  await sendRaw(accessToken, raw, ctx.threadId);
+}
+
+export async function forwardMessage({ accessToken, id, to, comment, from }) {
+  const original = await getMessage({ accessToken, id });
+  const subject = /^fwd?:/i.test(original.subject) ? original.subject : `Fwd: ${original.subject}`;
+  const forwarded = [
+    comment || "",
+    "",
+    "---------- Forwarded message ----------",
+    `From: ${original.fromName ? `${original.fromName} <${original.fromAddress}>` : original.fromAddress}`,
+    `Date: ${original.date}`,
+    `Subject: ${original.subject}`,
+    "",
+    original.body || original.snippet || "",
+  ].join("\r\n");
+  const raw = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    forwarded,
+  ].join("\r\n");
+  await sendRaw(accessToken, raw);
+}
+
+export async function setRead({ accessToken, id, read }) {
+  const body = read ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] };
+  const res = await fetch(`${GMAIL}/messages/${encodeURIComponent(id)}/modify`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Gmail mark error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+}
+
+// Soft delete — moves to Trash (recoverable), never a permanent purge.
+export async function trashMessage({ accessToken, id }) {
+  const res = await fetch(`${GMAIL}/messages/${encodeURIComponent(id)}/trash`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`Gmail delete error (${res.status}): ${(await res.text()).slice(0, 200)}`);
 }

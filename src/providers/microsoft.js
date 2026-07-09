@@ -15,7 +15,7 @@ function scopeString() {
     "User.Read",
     "https://graph.microsoft.com/Mail.Send",
   ];
-  if (READ) s.push("https://graph.microsoft.com/Mail.Read");
+  if (READ) s.push("https://graph.microsoft.com/Mail.Read", "https://graph.microsoft.com/Mail.ReadWrite");
   return s.join(" ");
 }
 
@@ -178,4 +178,44 @@ export async function getMessage({ accessToken, id }) {
     out.body = out.body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   }
   return out;
+}
+
+// ── Actions (require Mail.ReadWrite; reply/forward also use Mail.Send) ─────
+export async function replyMessage({ accessToken, id, comment }) {
+  const res = await fetch(`${GRAPH}/me/messages/${encodeURIComponent(id)}/reply`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ comment }),
+  });
+  if (res.status !== 202) throw new Error(`Graph reply error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+}
+
+export async function forwardMessage({ accessToken, id, to, comment }) {
+  const res = await fetch(`${GRAPH}/me/messages/${encodeURIComponent(id)}/forward`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      comment: comment || "",
+      toRecipients: [{ emailAddress: { address: to } }],
+    }),
+  });
+  if (res.status !== 202) throw new Error(`Graph forward error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+}
+
+export async function setRead({ accessToken, id, read }) {
+  const res = await fetch(`${GRAPH}/me/messages/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ isRead: !!read }),
+  });
+  if (!res.ok) throw new Error(`Graph mark error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+}
+
+// Soft delete — moves to Deleted Items (recoverable), never a permanent purge.
+export async function trashMessage({ accessToken, id }) {
+  const res = await fetch(`${GRAPH}/me/messages/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status !== 204) throw new Error(`Graph delete error (${res.status}): ${(await res.text()).slice(0, 200)}`);
 }
